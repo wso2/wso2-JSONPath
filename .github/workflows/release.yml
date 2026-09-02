@@ -1,0 +1,195 @@
+# -------------------------------------------------------------------------------------
+#
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied. See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# --------------------------------------------------------------------------------------
+
+# Publishes @wso2/jsonpath-plus to the public npm registry.
+#
+# Dispatch from the default branch, naming the release line (10.4.x, 11.x, ...)
+# and the version. The job checks that branch out and pushes back to it.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Release line to publish from (e.g. 10.4.x)'
+        required: true
+        default: '10.4.x'
+        type: string
+      version:
+        description: 'Version to publish (e.g. 10.4.1). Must match the upstream release this line is built from.'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run — verify and report what would be published, without pushing or publishing'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write   # push the release commit and tag
+  id-token: write   # sign the npm provenance attestation
+
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    # This file exists only on the default branch, so nothing else can run it.
+    if: github.ref_name == github.event.repository.default_branch
+
+    steps:
+      - name: Validate inputs
+        id: inputs
+        env:
+          # Untrusted input: read via env, never interpolated into the script.
+          INPUT_BRANCH: ${{ inputs.branch }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          BRANCH="$INPUT_BRANCH"
+          if ! printf '%s' "$BRANCH" | grep -Eq '^[0-9]+\.([0-9]+\.)?x$'; then
+            echo "::error::'$BRANCH' is not a release line (expected e.g. 10.4.x or 11.x)"
+            exit 1
+          fi
+          VERSION="${INPUT_VERSION#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$VERSION' is not a valid semantic version (expected MAJOR.MINOR.PATCH, e.g. 10.4.1)"
+            exit 1
+          fi
+          echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the release line
+        id: checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.inputs.outputs.branch }}
+          fetch-depth: 0
+          fetch-tags: true
+          # token defaults to GITHUB_TOKEN, persisted for the push step.
+
+      - name: Validate tag does not exist
+        id: check-tag
+        run: |
+          TAG="${{ steps.inputs.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists."
+            exit 1
+          fi
+
+      - name: Setup pnpm
+        id: setup-pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+          run_install: false
+
+      - name: Setup node
+        id: setup-node
+        uses: actions/setup-node@v7
+        with:
+          # pnpm 11 requires Node >= 22.13. The published package's own
+          # runtime floor is Node 16.9 and is unrelated to this.
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+          cache: 'pnpm'
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        id: install
+        run: pnpm install --frozen-lockfile
+
+      - name: Check the version is unpublished
+        id: check-npm
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION="${{ steps.inputs.outputs.version }}"
+          # npm versions are immutable, so fail before anything is pushed.
+          if npm view "${NAME}@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::${NAME}@${VERSION} is already published."
+            exit 1
+          fi
+
+      - name: Verify
+        id: verify
+        # eslint, rollup bundle, c8 coverage, tsc. There is no build script;
+        # rollup emits dist/ from within this.
+        run: npm test
+
+      # Runs on a dry run too, so the reported version is the real one.
+      - name: Set version
+        id: set-version
+        run: npm version "${{ steps.inputs.outputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Commit, tag and push
+        id: tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          VERSION="${{ steps.inputs.outputs.version }}"
+          TAG="${{ steps.inputs.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # dist/ and badges/ are tracked and rebuilt by the verify step, but
+          # usually reproduce byte-for-byte. Commit regardless, so every
+          # release is one identifiable commit and the tag never lands on an
+          # unrelated one.
+          git add package.json dist badges
+          git commit --allow-empty -m "release: @wso2/jsonpath-plus ${VERSION}"
+          git tag -a "$TAG" -m "@wso2/jsonpath-plus ${VERSION}"
+          git push origin "HEAD:refs/heads/${{ steps.inputs.outputs.branch }}"
+          git push origin "$TAG"
+
+      - name: Publish to npm
+        id: publish
+        env:
+          # Scoped to this step: earlier steps run dependency code and must
+          # not have the publish token in their environment.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        # Scoped packages default to restricted, hence --access public.
+        # --provenance attaches a signed build attestation; omitted on a dry
+        # run, which never contacts the registry.
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            npm publish --access public --dry-run
+          else
+            npm publish --access public --provenance
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "### Dry run - nothing was pushed or published"
+            else
+              echo "### Released"
+            fi
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Branch | \`${{ steps.inputs.outputs.branch }}\` |"
+            echo "| Version | \`${{ steps.inputs.outputs.version }}\` |"
+            echo "| Tag | \`${{ steps.inputs.outputs.tag }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
