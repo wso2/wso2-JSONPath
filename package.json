@@ -1,11 +1,10 @@
 {
   "author": "Stefan Goessner",
-  "name": "jsonpath-plus",
+  "name": "@wso2/jsonpath-plus",
   "version": "10.4.1",
   "type": "module",
   "bin": {
-    "jsonpath": "./bin/jsonpath-cli.js",
-    "jsonpath-plus": "./bin/jsonpath-cli.js"
+    "wso2-jsonpath": "./bin/jsonpath-cli.js"
   },
   "main": "dist/index-node-cjs.cjs",
   "exports": {
@@ -52,12 +51,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git://github.com/s3u/JSONPath.git"
+    "url": "git+https://github.com/wso2/wso2-JSONPath.git"
   },
-  "bugs": "https://github.com/s3u/JSONPath/issues/",
-  "homepage": "https://github.com/s3u/JSONPath",
+  "bugs": "https://github.com/wso2/wso2-JSONPath/issues",
+  "homepage": "https://github.com/wso2/wso2-JSONPath",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=16.9.0"
   },
   "react-native": {
     "vm": false
